@@ -10,8 +10,8 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, FSInputFile
 from openpyxl import Workbook
 
-API_TOKEN = "YOUR_BOT_TOKEN"
-ADMIN_ID = 123456789  # замените на свой Telegram ID
+API_TOKEN = "8193863071:AAHRXi7i_O0pZTvqlDoJ9Zl90bRd8pUp2I0"
+ADMIN_ID = 443860777  # замените на свой Telegram ID
 
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
@@ -309,3 +309,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+

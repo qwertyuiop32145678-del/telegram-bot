@@ -3,11 +3,11 @@ import os
 from datetime import datetime
 from collections import deque
 from aiogram import Bot, Dispatcher, types
-from aiogram.filters import CommandStart, Command
+from aiogram.filters import CommandStart
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, FSInputFile
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 from databases import Database
 from sqlalchemy import Table, Column, Integer, String, MetaData, create_engine
 
@@ -59,32 +59,32 @@ class Register(StatesGroup):
 
 # ====== Клавиатуры ======
 gender_kb = ReplyKeyboardMarkup(
-    keyboard=[[KeyboardButton(text="Мужской")],[KeyboardButton(text="Женский")]],
+    keyboard=[[KeyboardButton("Мужской")],[KeyboardButton("Женский")]],
     resize_keyboard=True
 )
 age_confirm_kb = ReplyKeyboardMarkup(
-    keyboard=[[KeyboardButton(text="18+"), KeyboardButton(text="Нет")]],
+    keyboard=[[KeyboardButton("18+"), KeyboardButton("Нет")]],
     resize_keyboard=True
 )
 mode_kb = ReplyKeyboardMarkup(
     keyboard=[
-        [KeyboardButton(text="Ролевик"), KeyboardButton(text="Вирт")],
-        [KeyboardButton(text="Общение")],
-        [KeyboardButton(text="Выбор другого режима")]
+        [KeyboardButton("Ролевик"), KeyboardButton("Вирт")],
+        [KeyboardButton("Общение")],
+        [KeyboardButton("Выбор другого режима")]
     ],
     resize_keyboard=True
 )
 feedback_kb = ReplyKeyboardMarkup(
     keyboard=[
-        [KeyboardButton(text="👍"), KeyboardButton(text="👎")],
-        [KeyboardButton(text="🚨 Пожаловаться")]
+        [KeyboardButton("👍"), KeyboardButton("👎")],
+        [KeyboardButton("🚨 Пожаловаться")]
     ],
     resize_keyboard=True
 )
 chat_kb = ReplyKeyboardMarkup(
     keyboard=[
-        [KeyboardButton(text="✅ Завершить диалог")],
-        [KeyboardButton(text="🔄 Новый собеседник")]
+        [KeyboardButton("✅ Завершить диалог")],
+        [KeyboardButton("🔄 Новый собеседник")]
     ],
     resize_keyboard=True
 )

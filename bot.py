@@ -21,12 +21,7 @@ dp = Dispatcher(storage=MemoryStorage())
 # ====== База данных ======
 conn = sqlite3.connect("bot.db")
 cursor = conn.cursor()
-cursor.execute(
-    "INSERT OR REPLACE INTO blocked_users (user_id, reason, timestamp) VALUES (?, ?, ?)",
-    (partner_id, "Слишком много жалоб", datetime.utcnow().isoformat())
-)
-conn.commit()
-
+cursor.execute("""
 CREATE TABLE IF NOT EXISTS feedback (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER,
@@ -247,13 +242,36 @@ async def chat_handler(message: types.Message):
 
     if message.text in ["👍","👎","🚨 Пожаловаться"]:
         partner_id = partner if partner else None
-        cursor.execute("INSERT INTO feedback (user_id, partner_id, feedback, timestamp) VALUES (?, ?, ?, ?)",
-                       (uid, partner_id, message.text, datetime.utcnow().isoformat()))
+        cursor.execute(
+            "INSERT INTO feedback (user_id, partner_id, feedback, timestamp) VALUES (?, ?, ?, ?)",
+            (uid, partner_id, message.text, datetime.utcnow().isoformat())
+        )
         conn.commit()
 
         if message.text == "🚨 Пожаловаться" and partner_id:
-            cursor.execute("SELECT COUNT(*) FROM feedback WHERE partner_id=? AND feedback='🚨 Пожаловаться'", (partner_id,))
+            cursor.execute(
+                "SELECT COUNT(*) FROM feedback WHERE partner_id=? AND feedback='🚨 Пожаловаться'",
+                (partner_id,)
+            )
             complaints = cursor.fetchone()[0]
             if complaints >= 3:
-                cursor.execute("INSERT OR REPLACE INTO blocked_users (user_id
+                cursor.execute(
+                    "INSERT OR REPLACE INTO blocked_users (user_id, reason, timestamp) VALUES (?, ?, ?)",
+                    (partner_id, "Слишком много жалоб", datetime.utcnow().isoformat())
+                )
+                conn.commit()
+                await bot.send_message(partner_id, "🚫 Вы были автоматически заблокированы из-за большого количества жалоб.")
+                await bot.send_message(ADMIN_ID, f"⚠ Пользователь {partner_id} автоматически заблокирован (жалобы: {complaints}).")
 
+        await message.answer("Спасибо за отзыв!", reply_markup=types.ReplyKeyboardRemove())
+        return
+
+    if partner:
+        await bot.send_message(partner, message.text)
+
+# ====== Запуск ======
+async def main():
+    await dp.start_polling(bot)
+
+if __name__ == "__main__":
+    asyncio.run(main())

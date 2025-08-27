@@ -1,59 +1,45 @@
 # bot.py
 import asyncio
 import os
-import csv
-import tempfile
 from datetime import datetime
 from collections import deque
-from typing import Optional
+
 from aiogram import Bot, Dispatcher, types
-from aiogram.filters import CommandStart, Command
+from aiogram.filters import CommandStart
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, FSInputFile
-from sqlalchemy import Table, Column, Integer, String, MetaData, create_engine, select, func
-from sqlalchemy.exc import SQLAlchemyError
-import openpyxl
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 
-# ====== ENV ======
+# SQLAlchemy sync engine (в фоне вызываем blocking операции через asyncio.to_thread)
+from sqlalchemy import Table, Column, Integer, String, MetaData, create_engine, select, func
+
+# ====== Переменные окружения ======
 API_TOKEN = os.environ.get("API_TOKEN")
 ADMIN_ID = os.environ.get("ADMIN_ID")
 CHANNEL_USERNAME = os.environ.get("CHANNEL_USERNAME", "anon_ru_chatik")
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
-if not API_TOKEN or not ADMIN_ID or not DATABASE_URL:
-    raise ValueError("Не заданы обязательные переменные окружения: API_TOKEN, ADMIN_ID или DATABASE_URL")
+if not API_TOKEN or not ADMIN_ID:
+    raise ValueError("Не заданы обязательные переменные окружения API_TOKEN или ADMIN_ID")
 
 try:
     ADMIN_ID = int(ADMIN_ID)
-except Exception as e:
-    raise ValueError("ADMIN_ID должна быть числом (Telegram user id)") from e
+except Exception:
+    raise ValueError("ADMIN_ID должна быть числом (Telegram user id)")
 
-# Для pg8000 SQLAlchemy dialect: заменяем схему, если необходимо
-_db_url = DATABASE_URL.strip()
-if _db_url.startswith("postgresql+"):
-    sa_url = _db_url
-elif _db_url.startswith("postgresql://"):
-    sa_url = _db_url.replace("postgresql://", "postgresql+pg8000://", 1)
-elif _db_url.startswith("postgres://"):
-    sa_url = _db_url.replace("postgres://", "postgresql+pg8000://", 1)
-else:
-    # если пользователь указал уже с pg8000 или иной драйвер — используем как есть
-    sa_url = _db_url
-
-# ====== Telegram bot ======
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
-# ====== DB (SQLAlchemy sync, pg8000 driver) ======
+# ====== PostgreSQL (SQLAlchemy sync engine) ======
+# Объявляем метаданные и таблицы, но НЕ вызываем create_all() на импорт — делаем в init_db внутри main
 metadata = MetaData()
 
 feedback_table = Table(
     "feedback", metadata,
     Column("id", Integer, primary_key=True, autoincrement=True),
     Column("user_id", Integer),
-    Column("partner_id", Integer, nullable=True),
+    Column("partner_id", Integer),
     Column("feedback", String),
     Column("timestamp", String)
 )
@@ -65,151 +51,155 @@ blocked_table = Table(
     Column("timestamp", String)
 )
 
-# create sync engine
-engine = create_engine(sa_url, future=True, echo=False)
-# create tables if not exist
-metadata.create_all(engine)
+if DATABASE_URL:
+    # engine может генерировать исключение при connect; мы всё равно создаём объект engine
+    engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+else:
+    engine = None
 
-# ====== In-memory structures ======
-users = {}           # user_id -> {"gender":..., "mode":..., "partner": ...}
-waiting = deque()    # queue of user_id
+# ====== Очередь пользователей (в памяти) ======
+users = {}        # user_id -> {"gender":..., "mode":..., "partner": ...}
+waiting = deque() # очередь user_id
 
-# ====== States ======
+# ====== FSM состояния ======
 class Register(StatesGroup):
     gender = State()
     age_confirm = State()
     mode = State()
 
-# ====== Keyboards (use keyword text= to avoid Pydantic positional issues) ======
+# ====== Клавиатуры ======
 gender_kb = ReplyKeyboardMarkup(
-    keyboard=[[KeyboardButton(text="Мужской")], [KeyboardButton(text="Женский")]],
+    keyboard=[[KeyboardButton("Мужской")], [KeyboardButton("Женский")]],
     resize_keyboard=True
 )
 age_confirm_kb = ReplyKeyboardMarkup(
-    keyboard=[[KeyboardButton(text="18+"), KeyboardButton(text="Нет")]],
+    keyboard=[[KeyboardButton("18+"), KeyboardButton("Нет")]],
     resize_keyboard=True
 )
 mode_kb = ReplyKeyboardMarkup(
     keyboard=[
-        [KeyboardButton(text="Ролевик"), KeyboardButton(text="Вирт")],
-        [KeyboardButton(text="Общение")],
-        [KeyboardButton(text="Выбор другого режима")]
+        [KeyboardButton("Ролевик"), KeyboardButton("Вирт")],
+        [KeyboardButton("Общение")],
+        [KeyboardButton("Выбор другого режима")]
     ],
     resize_keyboard=True
 )
 feedback_kb = ReplyKeyboardMarkup(
     keyboard=[
-        [KeyboardButton(text="👍"), KeyboardButton(text="👎")],
-        [KeyboardButton(text="🚨 Пожаловаться")]
+        [KeyboardButton("👍"), KeyboardButton("👎")],
+        [KeyboardButton("🚨 Пожаловаться")]
     ],
     resize_keyboard=True
 )
 chat_kb = ReplyKeyboardMarkup(
     keyboard=[
-        [KeyboardButton(text="✅ Завершить диалог")],
-        [KeyboardButton(text="🔄 Новый собеседник")]
+        [KeyboardButton("✅ Завершить диалог")],
+        [KeyboardButton("🔄 Новый собеседник")]
     ],
     resize_keyboard=True
 )
 
-# ====== DB helper wrappers (run sync SQLAlchemy in threadpool) ======
-def _insert_feedback_sync(user_id: int, partner_id: Optional[int], fb: str):
+# ====== Вспом. функции для работы с БД (sync -> executed in thread) ======
+async def init_db():
+    """Попытка создать таблицы (не падать при ошибке)."""
+    if engine is None:
+        print("DB not configured (DATABASE_URL not set). Skipping DB init.")
+        return
     try:
-        with engine.begin() as conn:
-            conn.execute(
-                feedback_table.insert().values(
-                    user_id=user_id,
-                    partner_id=partner_id,
-                    feedback=fb,
-                    timestamp=datetime.utcnow().isoformat()
-                )
-            )
-    except SQLAlchemyError:
-        pass
-
-async def insert_feedback(user_id: int, partner_id: Optional[int], fb: str):
-    await asyncio.to_thread(_insert_feedback_sync, user_id, partner_id, fb)
-
-def _count_complaints_sync(partner_id: int) -> int:
-    with engine.connect() as conn:
-        stmt = select(func.count()).select_from(feedback_table).where(
-            feedback_table.c.partner_id == partner_id,
-            feedback_table.c.feedback == "🚨 Пожаловаться"
-        )
-        r = conn.execute(stmt).scalar_one_or_none()
-        return int(r) if r is not None else 0
-
-async def count_complaints(partner_id: int) -> int:
-    return await asyncio.to_thread(_count_complaints_sync, partner_id)
-
-def _is_blocked_sync(user_id: int) -> bool:
-    with engine.connect() as conn:
-        stmt = select(blocked_table.c.user_id).where(blocked_table.c.user_id == user_id)
-        r = conn.execute(stmt).first()
-        return r is not None
+        await asyncio.to_thread(metadata.create_all, engine)
+        print("DB init: tables created (or already exist).")
+    except Exception as e:
+        # не падаем — просто логируем
+        print("DB init failed:", repr(e))
 
 async def is_blocked(user_id: int) -> bool:
-    return await asyncio.to_thread(_is_blocked_sync, user_id)
+    """Проверка блокировки в БД — если ошибка подключения, считать не заблокированным."""
+    if engine is None:
+        return False
+    try:
+        def _sync():
+            with engine.connect() as conn:
+                r = conn.execute(select(blocked_table.c.user_id).where(blocked_table.c.user_id == user_id))
+                return r.fetchone()
+        row = await asyncio.to_thread(_sync)
+        return row is not None
+    except Exception as e:
+        # если не можем подключиться — считаем не заблокированным
+        print("is_blocked db error:", repr(e))
+        return False
 
-def _block_user_sync(user_id: int, reason: str):
-    with engine.begin() as conn:
-        # insert or replace
-        conn.execute(
-            blocked_table.insert().prefix_with("OR REPLACE").values(
-                user_id=user_id,
-                reason=reason,
-                timestamp=datetime.utcnow().isoformat()
-            )
-        )
+async def insert_feedback(user_id: int, partner_id: int | None, feedback: str):
+    if engine is None:
+        return
+    try:
+        def _sync():
+            with engine.begin() as conn:
+                conn.execute(
+                    feedback_table.insert().values(
+                        user_id=user_id,
+                        partner_id=partner_id,
+                        feedback=feedback,
+                        timestamp=datetime.utcnow().isoformat()
+                    )
+                )
+        await asyncio.to_thread(_sync)
+    except Exception as e:
+        print("insert_feedback error:", repr(e))
 
-async def block_user(user_id: int, reason: str):
-    await asyncio.to_thread(_block_user_sync, user_id, reason)
+async def count_complaints_for(partner_id: int) -> int:
+    if engine is None:
+        return 0
+    try:
+        def _sync():
+            with engine.connect() as conn:
+                stmt = select(func.count()).select_from(feedback_table).where(
+                    (feedback_table.c.partner_id == partner_id) &
+                    (feedback_table.c.feedback == "🚨 Пожаловаться")
+                )
+                r = conn.execute(stmt).scalar()
+                return int(r or 0)
+        return await asyncio.to_thread(_sync)
+    except Exception as e:
+        print("count_complaints_for error:", repr(e))
+        return 0
 
-def _fetch_feedback_sync(limit: int = 20, filter_fb: Optional[str] = None):
-    with engine.connect() as conn:
-        stmt = select(feedback_table.c.user_id, feedback_table.c.partner_id, feedback_table.c.feedback, feedback_table.c.timestamp).order_by(feedback_table.c.id.desc()).limit(limit)
-        if filter_fb:
-            stmt = stmt.where(feedback_table.c.feedback == filter_fb)
-        rows = conn.execute(stmt).fetchall()
-        return rows
+async def block_user(partner_id: int, reason: str):
+    if engine is None:
+        return
+    try:
+        def _sync():
+            with engine.begin() as conn:
+                conn.execute(blocked_table.insert().values(
+                    user_id=partner_id,
+                    reason=reason,
+                    timestamp=datetime.utcnow().isoformat()
+                ))
+        await asyncio.to_thread(_sync)
+    except Exception as e:
+        print("block_user error:", repr(e))
 
-async def fetch_feedback(limit: int = 20, filter_fb: Optional[str] = None):
-    return await asyncio.to_thread(_fetch_feedback_sync, limit, filter_fb)
-
-def _fetch_all_feedback_sync():
-    with engine.connect() as conn:
-        stmt = select(feedback_table)
-        return conn.execute(stmt).fetchall()
-
-async def fetch_all_feedback():
-    return await asyncio.to_thread(_fetch_all_feedback_sync)
-
-# ====== Subscription check ======
+# ====== Проверка подписки ======
 async def is_subscribed(user_id: int) -> bool:
     try:
         member = await bot.get_chat_member(f"@{CHANNEL_USERNAME}", user_id)
-        status = getattr(member, "status", "")
-        if status in ("left", "kicked"):
-            return False
-        # sometimes member object has is_member
-        is_mem = getattr(member, "is_member", None)
-        if is_mem is not None:
-            return bool(is_mem)
-        return True
-    except Exception:
+        # надёжная проверка: если есть атрибут is_member либо статус не в ('left','kicked')
+        return getattr(member, "is_member", None) or getattr(member, "status", "") not in ("left", "kicked")
+    except Exception as e:
+        print("is_subscribed error:", repr(e))
+        # если не удалось проверить — считаем неподписанным
         return False
 
-# ====== Queue helpers ======
-def add_to_waiting(uid: int):
-    if uid not in users:
+# ====== Добавление в очередь (без дубликатов) ======
+def add_to_waiting(user_id: int):
+    if user_id not in users:
         return
-    if users[uid].get("partner"):
+    if users[user_id].get("partner"):
         return
-    if uid in waiting:
+    if user_id in waiting:
         return
-    waiting.append(uid)
+    waiting.append(user_id)
 
-# ====== Handlers ======
+# ====== /start ======
 @dp.message(CommandStart())
 async def start_cmd(message: types.Message, state: FSMContext):
     uid = message.from_user.id
@@ -224,6 +214,7 @@ async def start_cmd(message: types.Message, state: FSMContext):
     await message.answer("Привет! Укажи свой пол:", reply_markup=gender_kb)
     await state.set_state(Register.gender)
 
+# ====== FSM обработчики ======
 @dp.message(Register.gender)
 async def process_gender(message: types.Message, state: FSMContext):
     await state.update_data(gender=message.text)
@@ -253,13 +244,12 @@ async def process_mode(message: types.Message, state: FSMContext):
     await match_users()
     await state.clear()
 
-# ====== Matching logic ======
+# ====== Логика поиска партнёра ======
 async def match_users():
     i = 0
     while i < len(waiting):
         uid1 = waiting[i]
         if uid1 not in users:
-            # stale entry
             try:
                 waiting.remove(uid1)
             except ValueError:
@@ -280,7 +270,6 @@ async def match_users():
             if user2.get("partner"):
                 continue
 
-            # simple matching: same mode
             if user1["mode"] == user2["mode"]:
                 users[uid1]["partner"] = uid2
                 users[uid2]["partner"] = uid1
@@ -293,7 +282,6 @@ async def match_users():
                     users[uid2]["partner"] = None
                     continue
 
-                # remove them from waiting if present
                 try:
                     waiting.remove(uid1)
                 except ValueError:
@@ -309,7 +297,7 @@ async def match_users():
         if not paired:
             i += 1
 
-# ====== Chat handler ======
+# ====== Переписка и отзывы ======
 @dp.message()
 async def chat_handler(message: types.Message):
     uid = message.from_user.id
@@ -318,9 +306,7 @@ async def chat_handler(message: types.Message):
 
     partner = users[uid].get("partner")
 
-    # finish / new partner
     if message.text in ["✅ Завершить диалог", "🔄 Новый собеседник"]:
-        # notify partner and break partner relation both sides
         if partner and partner in users:
             users[partner]["partner"] = None
             try:
@@ -341,13 +327,12 @@ async def chat_handler(message: types.Message):
             await match_users()
         return
 
-    # feedback / complaint
     if message.text in ["👍", "👎", "🚨 Пожаловаться"]:
         partner_id = partner if partner else None
         await insert_feedback(uid, partner_id, message.text)
 
         if message.text == "🚨 Пожаловаться" and partner_id:
-            complaints = await count_complaints(partner_id)
+            complaints = await count_complaints_for(partner_id)
             if complaints >= 3:
                 await block_user(partner_id, "Слишком много жалоб")
                 if partner_id in users:
@@ -366,7 +351,6 @@ async def chat_handler(message: types.Message):
             pass
         return
 
-    # forward message to partner
     if partner and partner in users:
         try:
             await bot.send_message(partner, message.text)
@@ -376,101 +360,24 @@ async def chat_handler(message: types.Message):
             except Exception:
                 pass
 
-# ====== Admin commands ======
-@dp.message(Command("reports"))
-async def admin_reports(message: types.Message):
-    if message.from_user.id != ADMIN_ID:
-        await message.answer("У вас нет прав для этой команды.")
-        return
-
-    args = message.text.split()
-    filter_type = args[1] if len(args) > 1 else None
-    rows = await fetch_feedback(limit=50, filter_fb=filter_type)
-    if not rows:
-        await message.answer("Нет отзывов по данному фильтру.")
-        return
-
-    report_text = "Последние отзывы" + (f" ({filter_type})" if filter_type else "") + ":\n\n"
-    for u, p, f, ts in rows:
-        report_text += f"👤 {u} → {p if p else '-'} | {f} | {ts}\n"
-    await message.answer(report_text)
-
-@dp.message(Command("export"))
-async def admin_export_csv(message: types.Message):
-    if message.from_user.id != ADMIN_ID:
-        await message.answer("У вас нет прав для этой команды.")
-        return
-
-    rows = await fetch_all_feedback()
-    if not rows:
-        await message.answer("В базе пока нет отзывов.")
-        return
-
-    # write csv to tmp file
-    with tempfile.NamedTemporaryFile("w", delete=False, newline="", encoding="utf-8", suffix=".csv") as tmp:
-        writer = csv.writer(tmp)
-        writer.writerow(["id", "user_id", "partner_id", "feedback", "timestamp"])
-        for row in rows:
-            writer.writerow([row.id, row.user_id, row.partner_id, row.feedback, row.timestamp])
-        tmp_path = tmp.name
-
-    await message.answer_document(FSInputFile(tmp_path))
-
-@dp.message(Command("export_xlsx"))
-async def admin_export_xlsx(message: types.Message):
-    if message.from_user.id != ADMIN_ID:
-        await message.answer("У вас нет прав для этой команды.")
-        return
-
-    rows = await fetch_all_feedback()
-    if not rows:
-        await message.answer("В базе пока нет отзывов.")
-        return
-
-    wb = openpyxl.Workbook()
-    ws = wb.active
-    ws.append(["id", "user_id", "partner_id", "feedback", "timestamp"])
-    for row in rows:
-        ws.append([row.id, row.user_id, row.partner_id, row.feedback, row.timestamp])
-
-    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx")
-    wb.save(tmp.name)
-    await message.answer_document(FSInputFile(tmp.name))
-
-@dp.message(Command("unblock"))
-async def admin_unblock(message: types.Message):
-    if message.from_user.id != ADMIN_ID:
-        await message.answer("У вас нет прав для этой команды.")
-        return
-
-    args = message.text.split()
-    if len(args) != 2 or not args[1].isdigit():
-        await message.answer("Использование: /unblock user_id")
-        return
-    uid = int(args[1])
-    # remove from blocked_users
-    def _unblock_sync(u):
-        with engine.begin() as conn:
-            conn.execute(blocked_table.delete().where(blocked_table.c.user_id == u))
-    await asyncio.to_thread(_unblock_sync, uid)
-    await message.answer(f"✅ Пользователь {uid} разблокирован.")
-
-# ====== Cleanup ======
+# ====== Очистка очереди и партнёров при закрытии ======
 async def cleanup():
     try:
         waiting.clear()
         for uid in list(users.keys()):
             users[uid]["partner"] = None
-        # dispose engine
-        try:
-            engine.dispose()
-        except Exception:
-            pass
-    except Exception:
-        pass
+        # engine - синхронный; ничего критичного
+    except Exception as e:
+        print("cleanup error:", repr(e))
 
-# ====== Run ======
+# ====== Запуск ======
 async def main():
+    # инициализация БД (создание таблиц) — если всё ок
+    try:
+        await init_db()
+    except Exception as e:
+        print("init_db error:", repr(e))
+
     try:
         await dp.start_polling(bot)
     finally:

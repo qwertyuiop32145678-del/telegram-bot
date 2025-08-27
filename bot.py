@@ -11,7 +11,6 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 
-# SQLAlchemy sync engine (в фоне вызываем blocking операции через asyncio.to_thread)
 from sqlalchemy import Table, Column, Integer, String, MetaData, create_engine, select, func
 
 # ====== Переменные окружения ======
@@ -32,7 +31,6 @@ bot = Bot(token=API_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
 # ====== PostgreSQL (SQLAlchemy sync engine) ======
-# Объявляем метаданные и таблицы, но НЕ вызываем create_all() на импорт — делаем в init_db внутри main
 metadata = MetaData()
 
 feedback_table = Table(
@@ -52,14 +50,13 @@ blocked_table = Table(
 )
 
 if DATABASE_URL:
-    # engine может генерировать исключение при connect; мы всё равно создаём объект engine
     engine = create_engine(DATABASE_URL, pool_pre_ping=True)
 else:
     engine = None
 
 # ====== Очередь пользователей (в памяти) ======
-users = {}        # user_id -> {"gender":..., "mode":..., "partner": ...}
-waiting = deque() # очередь user_id
+users = {}
+waiting = deque()
 
 # ====== FSM состояния ======
 class Register(StatesGroup):
@@ -67,53 +64,50 @@ class Register(StatesGroup):
     age_confirm = State()
     mode = State()
 
-# ====== Клавиатуры ======
+# ====== Клавиатуры (KeyboardButton теперь с keyword arg text=) ======
 gender_kb = ReplyKeyboardMarkup(
-    keyboard=[[KeyboardButton("Мужской")], [KeyboardButton("Женский")]],
+    keyboard=[[KeyboardButton(text="Мужской")], [KeyboardButton(text="Женский")]],
     resize_keyboard=True
 )
 age_confirm_kb = ReplyKeyboardMarkup(
-    keyboard=[[KeyboardButton("18+"), KeyboardButton("Нет")]],
+    keyboard=[[KeyboardButton(text="18+"), KeyboardButton(text="Нет")]],
     resize_keyboard=True
 )
 mode_kb = ReplyKeyboardMarkup(
     keyboard=[
-        [KeyboardButton("Ролевик"), KeyboardButton("Вирт")],
-        [KeyboardButton("Общение")],
-        [KeyboardButton("Выбор другого режима")]
+        [KeyboardButton(text="Ролевик"), KeyboardButton(text="Вирт")],
+        [KeyboardButton(text="Общение")],
+        [KeyboardButton(text="Выбор другого режима")]
     ],
     resize_keyboard=True
 )
 feedback_kb = ReplyKeyboardMarkup(
     keyboard=[
-        [KeyboardButton("👍"), KeyboardButton("👎")],
-        [KeyboardButton("🚨 Пожаловаться")]
+        [KeyboardButton(text="👍"), KeyboardButton(text="👎")],
+        [KeyboardButton(text="🚨 Пожаловаться")]
     ],
     resize_keyboard=True
 )
 chat_kb = ReplyKeyboardMarkup(
     keyboard=[
-        [KeyboardButton("✅ Завершить диалог")],
-        [KeyboardButton("🔄 Новый собеседник")]
+        [KeyboardButton(text="✅ Завершить диалог")],
+        [KeyboardButton(text="🔄 Новый собеседник")]
     ],
     resize_keyboard=True
 )
 
-# ====== Вспом. функции для работы с БД (sync -> executed in thread) ======
+# ====== DB helper functions (sync via asyncio.to_thread) ======
 async def init_db():
-    """Попытка создать таблицы (не падать при ошибке)."""
     if engine is None:
         print("DB not configured (DATABASE_URL not set). Skipping DB init.")
         return
     try:
         await asyncio.to_thread(metadata.create_all, engine)
-        print("DB init: tables created (or already exist).")
+        print("DB init done.")
     except Exception as e:
-        # не падаем — просто логируем
         print("DB init failed:", repr(e))
 
 async def is_blocked(user_id: int) -> bool:
-    """Проверка блокировки в БД — если ошибка подключения, считать не заблокированным."""
     if engine is None:
         return False
     try:
@@ -124,8 +118,7 @@ async def is_blocked(user_id: int) -> bool:
         row = await asyncio.to_thread(_sync)
         return row is not None
     except Exception as e:
-        # если не можем подключиться — считаем не заблокированным
-        print("is_blocked db error:", repr(e))
+        print("is_blocked error:", repr(e))
         return False
 
 async def insert_feedback(user_id: int, partner_id: int | None, feedback: str):
@@ -134,14 +127,12 @@ async def insert_feedback(user_id: int, partner_id: int | None, feedback: str):
     try:
         def _sync():
             with engine.begin() as conn:
-                conn.execute(
-                    feedback_table.insert().values(
-                        user_id=user_id,
-                        partner_id=partner_id,
-                        feedback=feedback,
-                        timestamp=datetime.utcnow().isoformat()
-                    )
-                )
+                conn.execute(feedback_table.insert().values(
+                    user_id=user_id,
+                    partner_id=partner_id,
+                    feedback=feedback,
+                    timestamp=datetime.utcnow().isoformat()
+                ))
         await asyncio.to_thread(_sync)
     except Exception as e:
         print("insert_feedback error:", repr(e))
@@ -156,8 +147,7 @@ async def count_complaints_for(partner_id: int) -> int:
                     (feedback_table.c.partner_id == partner_id) &
                     (feedback_table.c.feedback == "🚨 Пожаловаться")
                 )
-                r = conn.execute(stmt).scalar()
-                return int(r or 0)
+                return int(conn.execute(stmt).scalar() or 0)
         return await asyncio.to_thread(_sync)
     except Exception as e:
         print("count_complaints_for error:", repr(e))
@@ -182,14 +172,12 @@ async def block_user(partner_id: int, reason: str):
 async def is_subscribed(user_id: int) -> bool:
     try:
         member = await bot.get_chat_member(f"@{CHANNEL_USERNAME}", user_id)
-        # надёжная проверка: если есть атрибут is_member либо статус не в ('left','kicked')
         return getattr(member, "is_member", None) or getattr(member, "status", "") not in ("left", "kicked")
     except Exception as e:
         print("is_subscribed error:", repr(e))
-        # если не удалось проверить — считаем неподписанным
         return False
 
-# ====== Добавление в очередь (без дубликатов) ======
+# ====== Очередь и matching ======
 def add_to_waiting(user_id: int):
     if user_id not in users:
         return
@@ -199,7 +187,6 @@ def add_to_waiting(user_id: int):
         return
     waiting.append(user_id)
 
-# ====== /start ======
 @dp.message(CommandStart())
 async def start_cmd(message: types.Message, state: FSMContext):
     uid = message.from_user.id
@@ -214,7 +201,6 @@ async def start_cmd(message: types.Message, state: FSMContext):
     await message.answer("Привет! Укажи свой пол:", reply_markup=gender_kb)
     await state.set_state(Register.gender)
 
-# ====== FSM обработчики ======
 @dp.message(Register.gender)
 async def process_gender(message: types.Message, state: FSMContext):
     await state.update_data(gender=message.text)
@@ -244,16 +230,13 @@ async def process_mode(message: types.Message, state: FSMContext):
     await match_users()
     await state.clear()
 
-# ====== Логика поиска партнёра ======
 async def match_users():
     i = 0
     while i < len(waiting):
         uid1 = waiting[i]
         if uid1 not in users:
-            try:
-                waiting.remove(uid1)
-            except ValueError:
-                pass
+            try: waiting.remove(uid1)
+            except ValueError: pass
             continue
 
         user1 = users[uid1]
@@ -273,7 +256,6 @@ async def match_users():
             if user1["mode"] == user2["mode"]:
                 users[uid1]["partner"] = uid2
                 users[uid2]["partner"] = uid1
-
                 try:
                     await bot.send_message(uid1, f"Найден собеседник! {user2['gender']}", reply_markup=chat_kb)
                     await bot.send_message(uid2, f"Найден собеседник! {user1['gender']}", reply_markup=chat_kb)
@@ -282,22 +264,16 @@ async def match_users():
                     users[uid2]["partner"] = None
                     continue
 
-                try:
-                    waiting.remove(uid1)
-                except ValueError:
-                    pass
-                try:
-                    waiting.remove(uid2)
-                except ValueError:
-                    pass
-
+                try: waiting.remove(uid1)
+                except ValueError: pass
+                try: waiting.remove(uid2)
+                except ValueError: pass
                 paired = True
                 break
 
         if not paired:
             i += 1
 
-# ====== Переписка и отзывы ======
 @dp.message()
 async def chat_handler(message: types.Message):
     uid = message.from_user.id
@@ -336,14 +312,10 @@ async def chat_handler(message: types.Message):
             if complaints >= 3:
                 await block_user(partner_id, "Слишком много жалоб")
                 if partner_id in users:
-                    try:
-                        await bot.send_message(partner_id, "🚫 Вы были автоматически заблокированы из-за большого количества жалоб.")
-                    except Exception:
-                        pass
-                try:
-                    await bot.send_message(ADMIN_ID, f"⚠ Пользователь {partner_id} автоматически заблокирован (жалобы: {complaints}).")
-                except Exception:
-                    pass
+                    try: await bot.send_message(partner_id, "🚫 Вы были автоматически заблокированы из-за большого количества жалоб.")
+                    except Exception: pass
+                try: await bot.send_message(ADMIN_ID, f"⚠ Пользователь {partner_id} автоматически заблокирован (жалобы: {complaints}).")
+                except Exception: pass
 
         try:
             await message.answer("Спасибо за отзыв!", reply_markup=types.ReplyKeyboardRemove())
@@ -355,24 +327,18 @@ async def chat_handler(message: types.Message):
         try:
             await bot.send_message(partner, message.text)
         except Exception:
-            try:
-                await message.answer("Не удалось отправить сообщение собеседнику.")
-            except Exception:
-                pass
+            try: await message.answer("Не удалось отправить сообщение собеседнику.")
+            except Exception: pass
 
-# ====== Очистка очереди и партнёров при закрытии ======
 async def cleanup():
     try:
         waiting.clear()
         for uid in list(users.keys()):
             users[uid]["partner"] = None
-        # engine - синхронный; ничего критичного
     except Exception as e:
         print("cleanup error:", repr(e))
 
-# ====== Запуск ======
 async def main():
-    # инициализация БД (создание таблиц) — если всё ок
     try:
         await init_db()
     except Exception as e:

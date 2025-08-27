@@ -241,10 +241,20 @@ async def chat_handler(message: types.Message):
         except:
             pass
 
+# ====== Очистка очереди и партнёров при закрытии ======
+async def cleanup():
+    waiting.clear()
+    for uid in users:
+        users[uid]["partner"] = None
+    await db.disconnect()
+
 # ====== Запуск ======
 async def main():
-    await db.connect()
-    await dp.start_polling(bot)
+    try:
+        await db.connect()
+        await dp.start_polling(bot)
+    finally:
+        await cleanup()
 
 if __name__ == "__main__":
     asyncio.run(main())

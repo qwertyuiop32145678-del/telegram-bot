@@ -1,3 +1,4 @@
-asyncpg
-databases[postgresql]
-aiogram==3.1.0
+aiogram==3.6.0
+databases[postgresql]==0.6.3
+SQLAlchemy==2.0.26
+asyncpg==0.27.0

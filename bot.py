@@ -10,7 +10,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 from databases import Database
-from sqlalchemy import Table, Column, Integer, String, MetaData, create_engine, select
+from sqlalchemy import Table, Column, Integer, String, MetaData, create_engine
 
 # ====== Переменные окружения ======
 API_TOKEN = os.environ.get("API_TOKEN")
@@ -19,7 +19,7 @@ CHANNEL_USERNAME = os.environ.get("CHANNEL_USERNAME", "anon_ru_chatik")
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
 if not API_TOKEN or not ADMIN_ID or not DATABASE_URL:
-    raise ValueError("Не заданы обязательные переменные окружения API_TOKEN, ADMIN_ID или DATABASE_URL")
+    raise ValueError("Не заданы обязательные переменные окружения: API_TOKEN, ADMIN_ID или DATABASE_URL")
 
 try:
     ADMIN_ID = int(ADMIN_ID)
@@ -48,7 +48,7 @@ blocked_table = Table(
     Column("timestamp", String)
 )
 
-# Создаём (синхронно) таблицы через SQLAlchemy engine (удобно при старте)
+# Создаём таблицы синхронно (при старте)
 engine = create_engine(DATABASE_URL)
 metadata.create_all(engine)
 
@@ -101,23 +101,23 @@ chat_kb = ReplyKeyboardMarkup(
 async def is_subscribed(user_id: int) -> bool:
     try:
         member = await bot.get_chat_member(f"@{CHANNEL_USERNAME}", user_id)
-        # aiogram types ChatMember has .is_member or status, keep robust:
-        return getattr(member, "is_member", None) or getattr(member, "status", "") not in ("left", "kicked")
+        status = getattr(member, "status", "")
+        if status in ("left", "kicked"):
+            return False
+        return True
     except Exception:
-        # если ошибка (например, бот не админ/канал приватный), считаем неподписанным
         return False
 
 # ====== Проверка блокировки (асинхронно) ======
 async def is_blocked(user_id: int) -> bool:
     try:
-        row = await db.fetch_one(select([blocked_table.c.user_id]).where(blocked_table.c.user_id == user_id))
+        row = await db.fetch_one("SELECT user_id FROM blocked_users WHERE user_id = :uid", values={"uid": user_id})
         return row is not None
     except Exception:
         return False
 
 # ====== Добавление в очередь (без дубликатов) ======
 def add_to_waiting(user_id: int):
-    # guard: пользователь должен быть в users
     if user_id not in users:
         return
     if users[user_id].get("partner"):
@@ -129,7 +129,6 @@ def add_to_waiting(user_id: int):
 # ====== /start ======
 @dp.message(CommandStart())
 async def start_cmd(message: types.Message, state: FSMContext):
-    # db.connect выполняется в main при старте процесса, не здесь
     uid = message.from_user.id
     if await is_blocked(uid):
         await message.answer("🚫 Вы заблокированы и не можете пользоваться ботом.")
@@ -162,7 +161,6 @@ async def process_age_confirm(message: types.Message, state: FSMContext):
 async def process_mode(message: types.Message, state: FSMContext):
     data = await state.get_data()
     uid = message.from_user.id
-    # сохраняем профиль в памяти (для простоты)
     users[uid] = {
         "gender": data.get("gender", "Не указан"),
         "mode": message.text,
@@ -175,11 +173,9 @@ async def process_mode(message: types.Message, state: FSMContext):
 
 # ====== Логика поиска партнёра ======
 async def match_users():
-    # простая O(n^2) проверка пары в очереди по mode
     i = 0
     while i < len(waiting):
         uid1 = waiting[i]
-        # возможно пользователь вышел — защитимся
         if uid1 not in users:
             try:
                 waiting.remove(uid1)
@@ -201,22 +197,18 @@ async def match_users():
             if user2.get("partner"):
                 continue
 
-            # критерий сопоставления: совпадает режим
             if user1["mode"] == user2["mode"]:
                 users[uid1]["partner"] = uid2
                 users[uid2]["partner"] = uid1
 
-                # уведомляем обоих
                 try:
                     await bot.send_message(uid1, f"Найден собеседник! {user2['gender']}", reply_markup=chat_kb)
                     await bot.send_message(uid2, f"Найден собеседник! {user1['gender']}", reply_markup=chat_kb)
                 except Exception:
-                    # если не удалось доставить – очищаем пары и продолжаем
                     users[uid1]["partner"] = None
                     users[uid2]["partner"] = None
                     continue
 
-                # удаляем их из очереди (если они там)
                 try:
                     waiting.remove(uid1)
                 except ValueError:
@@ -241,9 +233,7 @@ async def chat_handler(message: types.Message):
 
     partner = users[uid].get("partner")
 
-    # кнопки завершения / новый партнер
     if message.text in ["✅ Завершить диалог", "🔄 Новый собеседник"]:
-        # уведомляем партнёра, разрываем пару у обоих
         if partner and partner in users:
             users[partner]["partner"] = None
             try:
@@ -264,7 +254,6 @@ async def chat_handler(message: types.Message):
             await match_users()
         return
 
-    # обработка отзывов / жалоб
     if message.text in ["👍", "👎", "🚨 Пожаловаться"]:
         partner_id = partner if partner else None
         try:
@@ -277,10 +266,8 @@ async def chat_handler(message: types.Message):
                 )
             )
         except Exception:
-            # логируем, но не падаем
             pass
 
-        # автоматическая блокировка при >=3 жалоб
         if message.text == "🚨 Пожаловаться" and partner_id:
             try:
                 row = await db.fetch_one(
@@ -320,24 +307,21 @@ async def chat_handler(message: types.Message):
             pass
         return
 
-    # обычная пересылка текста партнёру
     if partner and partner in users:
         try:
             await bot.send_message(partner, message.text)
         except Exception:
-            # если не удалось доставить – уведомим отправителя
             try:
                 await message.answer("Не удалось отправить сообщение собеседнику.")
             except Exception:
                 pass
 
-# ====== Очистка очереди и партнёров при закрытии ======
+# ====== Очистка ======
 async def cleanup():
     try:
         waiting.clear()
         for uid in list(users.keys()):
             users[uid]["partner"] = None
-        # попробуем отключиться от БД, если подключены
         try:
             await db.disconnect()
         except Exception:
@@ -347,7 +331,6 @@ async def cleanup():
 
 # ====== Запуск ======
 async def main():
-    # подключаемся к БД один раз при старте
     await db.connect()
     try:
         await dp.start_polling(bot)

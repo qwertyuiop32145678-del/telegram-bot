@@ -10,10 +10,12 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, FSInputFile
 from openpyxl import Workbook
 import os
+import csv
 
 # ====== Переменные окружения ======
 API_TOKEN = os.environ.get("API_TOKEN")
 ADMIN_ID = int(os.environ.get("ADMIN_ID"))
+CHANNEL_USERNAME = "anon_ru_chatik"
 
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
@@ -40,26 +42,43 @@ CREATE TABLE IF NOT EXISTS blocked_users (
 conn.commit()
 
 # ====== Хранилище пользователей ======
-users = {}           # user_id -> данные пользователя
-waiting = deque()    # очередь поиска партнера
+users = {}
+waiting = deque()
 
 # ====== FSM состояния ======
 class Register(StatesGroup):
+    check_subscribe = State()
     gender = State()
-    age = State()
-    looking_gender = State()
-    looking_age = State()
+    age_confirm = State()
+    mode = State()
 
 # ====== Клавиатуры ======
-feedback_kb = ReplyKeyboardMarkup(
-    keyboard=[[KeyboardButton(text="👍"), KeyboardButton(text="👎")],
-              [KeyboardButton(text="🚨 Пожаловаться")]],
+gender_kb = ReplyKeyboardMarkup(
+    keyboard=[[KeyboardButton("Мужской")], [KeyboardButton("Женский")]],
     resize_keyboard=True
 )
-
+age_confirm_kb = ReplyKeyboardMarkup(
+    keyboard=[[KeyboardButton("Мне есть 18 лет ✅")],
+              [KeyboardButton("Мне нет 18 лет ❌")]],
+    resize_keyboard=True
+)
+mode_kb = ReplyKeyboardMarkup(
+    keyboard=[
+        [KeyboardButton("Поиск ролевика")],
+        [KeyboardButton("Поиск вирта")],
+        [KeyboardButton("Просто общение")],
+        [KeyboardButton("Выбор другого режима")]
+    ],
+    resize_keyboard=True
+)
+feedback_kb = ReplyKeyboardMarkup(
+    keyboard=[[KeyboardButton("👍"), KeyboardButton("👎")],
+              [KeyboardButton("🚨 Пожаловаться")]],
+    resize_keyboard=True
+)
 chat_kb = ReplyKeyboardMarkup(
-    keyboard=[[KeyboardButton(text="✅ Завершить диалог")],
-              [KeyboardButton(text="🔄 Новый собеседник")]],
+    keyboard=[[KeyboardButton("✅ Завершить диалог")],
+              [KeyboardButton("🔄 Новый собеседник")]],
     resize_keyboard=True
 )
 
@@ -73,110 +92,60 @@ def add_to_waiting(user_id):
     if user_id not in waiting and not users[user_id].get("partner"):
         waiting.append(user_id)
 
-# ====== Команды ======
+# ====== Стартовый хэндлер с проверкой подписки ======
 @dp.message(CommandStart())
 async def start_cmd(message: types.Message, state: FSMContext):
-    if is_blocked(message.from_user.id):
+    uid = message.from_user.id
+    if is_blocked(uid):
         await message.answer("🚫 Вы заблокированы и не можете пользоваться ботом.")
         return
 
-    await message.answer("Привет! Укажи свой пол:",
-                         reply_markup=ReplyKeyboardMarkup(
-                             keyboard=[[KeyboardButton(text="Мужской")], [KeyboardButton(text="Женский")]],
-                             resize_keyboard=True))
+    try:
+        member = await bot.get_chat_member(f"@{CHANNEL_USERNAME}", uid)
+        if member.status == "left":
+            await message.answer(f"⚠ Подпишитесь на канал @{CHANNEL_USERNAME}, чтобы пользоваться ботом.")
+            return
+    except:
+        await message.answer(f"⚠ Подпишитесь на канал @{CHANNEL_USERNAME}, чтобы пользоваться ботом.")
+        return
+
+    await message.answer("Привет! Укажи свой пол:", reply_markup=gender_kb)
     await state.set_state(Register.gender)
-
-# ====== Админские команды ======
-@dp.message(Command("reports"))
-async def reports_cmd(message: types.Message):
-    if message.from_user.id != ADMIN_ID:
-        await message.answer("У вас нет прав для этой команды.")
-        return
-
-    args = message.text.split()
-    filter_type = args[1] if len(args) > 1 else None
-
-    query = "SELECT user_id, partner_id, feedback, timestamp FROM feedback"
-    params = []
-
-    if filter_type in ["👍","👎","🚨"]:
-        query += " WHERE feedback = ?"
-        params.append(filter_type)
-
-    query += " ORDER BY id DESC LIMIT 20"
-    cursor.execute(query, params)
-    rows = cursor.fetchall()
-
-    if not rows:
-        await message.answer("Нет отзывов по данному фильтру.")
-        return
-
-    text = "Последние 20 отзывов" + (f" ({filter_type})" if filter_type else "") + ":\n\n"
-    for u,p,f,t in rows:
-        text += f"👤 {u} → {p if p else '-'} | {f} | {t}\n"
-    await message.answer(text)
-
-@dp.message(Command("unblock"))
-async def unblock_cmd(message: types.Message):
-    if message.from_user.id != ADMIN_ID:
-        await message.answer("У вас нет прав для этой команды.")
-        return
-
-    args = message.text.split()
-    if len(args) != 2 or not args[1].isdigit():
-        await message.answer("Использование: /unblock user_id")
-        return
-
-    uid = int(args[1])
-    cursor.execute("DELETE FROM blocked_users WHERE user_id=?", (uid,))
-    conn.commit()
-    await message.answer(f"✅ Пользователь {uid} разблокирован.")
 
 # ====== FSM обработчики ======
 @dp.message(Register.gender)
 async def process_gender(message: types.Message, state: FSMContext):
     await state.update_data(gender=message.text)
-    await message.answer("Укажи свой возраст (числом):", reply_markup=types.ReplyKeyboardRemove())
-    await state.set_state(Register.age)
+    await message.answer("Подтвердите, что вам есть 18 лет:", reply_markup=age_confirm_kb)
+    await state.set_state(Register.age_confirm)
 
-@dp.message(Register.age)
-async def process_age(message: types.Message, state: FSMContext):
-    if not message.text.isdigit():
-        await message.answer("Введите возраст числом!")
+@dp.message(Register.age_confirm)
+async def process_age_confirm(message: types.Message, state: FSMContext):
+    if message.text == "Мне нет 18 лет ❌":
+        await message.answer("🚫 Извините, бот доступен только для пользователей старше 18 лет.")
+        await state.clear()
         return
-    await state.update_data(age=int(message.text))
-    await message.answer("Кого ищем? Укажи пол:",
-                         reply_markup=ReplyKeyboardMarkup(
-                             keyboard=[[KeyboardButton(text="Мужской")],[KeyboardButton(text="Женский")]],
-                             resize_keyboard=True))
-    await state.set_state(Register.looking_gender)
-
-@dp.message(Register.looking_gender)
-async def process_looking_gender(message: types.Message, state: FSMContext):
-    await state.update_data(looking_gender=message.text)
-    await message.answer("Укажи минимальный возраст собеседника:")
-    await state.set_state(Register.looking_age)
-
-@dp.message(Register.looking_age)
-async def process_looking_age(message: types.Message, state: FSMContext):
-    if not message.text.isdigit():
-        await message.answer("Введите возраст числом!")
+    elif message.text != "Мне есть 18 лет ✅":
+        await message.answer("Пожалуйста, выберите один из вариантов.")
         return
+    await message.answer("Выберите режим общения:", reply_markup=mode_kb)
+    await state.set_state(Register.mode)
 
-    if is_blocked(message.from_user.id):
-        await message.answer("🚫 Вы заблокированы и не можете искать собеседников.")
+@dp.message(Register.mode)
+async def process_mode(message: types.Message, state: FSMContext):
+    uid = message.from_user.id
+    if message.text == "Выбор другого режима":
+        await message.answer("Выберите режим общения:", reply_markup=mode_kb)
         return
 
     data = await state.get_data()
-    uid = message.from_user.id
     users[uid] = {
         "gender": data["gender"],
-        "age": data["age"],
-        "looking_for": {"gender": data["looking_gender"], "min_age": int(message.text)},
+        "mode": message.text,
         "partner": None
     }
 
-    await message.answer("Отлично! Теперь ты в поиске. Жди собеседника…")
+    await message.answer(f"Отлично! Теперь вы в поиске собеседника для '{message.text}'. Ждите собеседника…", reply_markup=types.ReplyKeyboardRemove())
     add_to_waiting(uid)
     await match_users()
     await state.clear()
@@ -198,22 +167,17 @@ async def match_users():
             if user2.get("partner"):
                 continue
 
-            if (user1["looking_for"]["gender"] == user2["gender"] and
-                user2["looking_for"]["gender"] == user1["gender"] and
-                user1["age"] >= user2["looking_for"]["min_age"] and
-                user2["age"] >= user1["looking_for"]["min_age"]):
-
+            if user1["mode"] == user2["mode"]:
                 users[uid1]["partner"] = uid2
                 users[uid2]["partner"] = uid1
 
-                await bot.send_message(uid1, f"Найден собеседник! {user2['gender']}, {user2['age']} лет.", reply_markup=chat_kb)
-                await bot.send_message(uid2, f"Найден собеседник! {user1['gender']}, {user1['age']} лет.", reply_markup=chat_kb)
+                await bot.send_message(uid1, f"Найден собеседник! {user2['gender']}", reply_markup=chat_kb)
+                await bot.send_message(uid2, f"Найден собеседник! {user1['gender']}", reply_markup=chat_kb)
 
                 waiting.remove(uid1)
                 waiting.remove(uid2)
                 paired = True
                 break
-
         if not paired:
             i += 1
 
@@ -226,7 +190,7 @@ async def chat_handler(message: types.Message):
 
     partner = users[uid].get("partner")
 
-    if message.text in ["✅ Завершить диалог","🔄 Новый собеседник"]:
+    if message.text in ["✅ Завершить диалог", "🔄 Новый собеседник"]:
         if partner:
             users[partner]["partner"] = None
             await bot.send_message(partner, "Собеседник завершил диалог. Оставьте отзыв:", reply_markup=feedback_kb)
@@ -241,25 +205,18 @@ async def chat_handler(message: types.Message):
             await match_users()
         return
 
-    if message.text in ["👍","👎","🚨 Пожаловаться"]:
+    if message.text in ["👍", "👎", "🚨 Пожаловаться"]:
         partner_id = partner if partner else None
-        cursor.execute(
-            "INSERT INTO feedback (user_id, partner_id, feedback, timestamp) VALUES (?, ?, ?, ?)",
-            (uid, partner_id, message.text, datetime.utcnow().isoformat())
-        )
+        cursor.execute("INSERT INTO feedback (user_id, partner_id, feedback, timestamp) VALUES (?, ?, ?, ?)",
+                       (uid, partner_id, message.text, datetime.utcnow().isoformat()))
         conn.commit()
 
         if message.text == "🚨 Пожаловаться" and partner_id:
-            cursor.execute(
-                "SELECT COUNT(*) FROM feedback WHERE partner_id=? AND feedback='🚨 Пожаловаться'",
-                (partner_id,)
-            )
+            cursor.execute("SELECT COUNT(*) FROM feedback WHERE partner_id=? AND feedback='🚨 Пожаловаться'", (partner_id,))
             complaints = cursor.fetchone()[0]
             if complaints >= 3:
-                cursor.execute(
-                    "INSERT OR REPLACE INTO blocked_users (user_id, reason, timestamp) VALUES (?, ?, ?)",
-                    (partner_id, "Слишком много жалоб", datetime.utcnow().isoformat())
-                )
+                cursor.execute("INSERT OR REPLACE INTO blocked_users (user_id, reason, timestamp) VALUES (?, ?, ?)",
+                               (partner_id, "Слишком много жалоб", datetime.utcnow().isoformat()))
                 conn.commit()
                 await bot.send_message(partner_id, "🚫 Вы были автоматически заблокированы из-за большого количества жалоб.")
                 await bot.send_message(ADMIN_ID, f"⚠ Пользователь {partner_id} автоматически заблокирован (жалобы: {complaints}).")
@@ -269,6 +226,80 @@ async def chat_handler(message: types.Message):
 
     if partner:
         await bot.send_message(partner, message.text)
+
+# ====== Админские команды ======
+@dp.message(Command("reports"))
+async def reports_cmd(message: types.Message):
+    if message.from_user.id != ADMIN_ID:
+        await message.answer("У вас нет прав для этой команды.")
+        return
+    args = message.text.split()
+    filter_type = args[1] if len(args) > 1 else None
+    query = "SELECT user_id, partner_id, feedback, timestamp FROM feedback"
+    params = []
+    if filter_type in ["👍","👎","🚨"]:
+        query += " WHERE feedback=?"
+        params.append(filter_type)
+    query += " ORDER BY id DESC LIMIT 20"
+    cursor.execute(query, params)
+    rows = cursor.fetchall()
+    if not rows:
+        await message.answer("Нет отзывов по данному фильтру.")
+        return
+    text = "Последние 20 отзывов" + (f" ({filter_type})" if filter_type else "") + ":\n\n"
+    for u, p, f, t in rows:
+        text += f"👤 {u} → {p if p else '-'} | {f} | {t}\n"
+    await message.answer(text)
+
+@dp.message(Command("unblock"))
+async def unblock_cmd(message: types.Message):
+    if message.from_user.id != ADMIN_ID:
+        await message.answer("У вас нет прав для этой команды.")
+        return
+    args = message.text.split()
+    if len(args) != 2 or not args[1].isdigit():
+        await message.answer("Использование: /unblock user_id")
+        return
+    uid = int(args[1])
+    cursor.execute("DELETE FROM blocked_users WHERE user_id=?", (uid,))
+    conn.commit()
+    await message.answer(f"✅ Пользователь {uid} разблокирован.")
+
+@dp.message(Command("export"))
+async def export_csv(message: types.Message):
+    if message.from_user.id != ADMIN_ID:
+        await message.answer("У вас нет прав для этой команды.")
+        return
+    cursor.execute("SELECT * FROM feedback")
+    rows = cursor.fetchall()
+    if not rows:
+        await message.answer("В базе пока нет отзывов.")
+        return
+    filename = "feedback_export.csv"
+    with open(filename, "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(["id","user_id","partner_id","feedback","timestamp"])
+        writer.writerows(rows)
+    await message.answer_document(FSInputFile(filename))
+
+@dp.message(Command("export_xlsx"))
+async def export_xlsx(message: types.Message):
+    if message.from_user.id != ADMIN_ID:
+        await message.answer("У вас нет прав для этой команды.")
+        return
+    cursor.execute("SELECT * FROM feedback")
+    rows = cursor.fetchall()
+    if not rows:
+        await message.answer("В базе пока нет отзывов.")
+        return
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["id","user_id","partner_id","feedback","timestamp"])
+    for row in rows:
+        ws.append(row)
+    filename = "feedback_export.xlsx"
+    wb.save(filename)
+    await message.answer_document(FSInputFile(filename))
 
 # ====== Запуск ======
 async def main():

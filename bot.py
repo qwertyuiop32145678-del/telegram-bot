@@ -21,7 +21,12 @@ dp = Dispatcher(storage=MemoryStorage())
 # ====== База данных ======
 conn = sqlite3.connect("bot.db")
 cursor = conn.cursor()
-cursor.execute("""
+cursor.execute(
+    "INSERT OR REPLACE INTO blocked_users (user_id, reason, timestamp) VALUES (?, ?, ?)",
+    (partner_id, "Слишком много жалоб", datetime.utcnow().isoformat())
+)
+conn.commit()
+
 CREATE TABLE IF NOT EXISTS feedback (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER,
@@ -251,3 +256,4 @@ async def chat_handler(message: types.Message):
             complaints = cursor.fetchone()[0]
             if complaints >= 3:
                 cursor.execute("INSERT OR REPLACE INTO blocked_users (user_id
+

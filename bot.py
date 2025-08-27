@@ -52,13 +52,14 @@ class Register(StatesGroup):
 
 # ====== Клавиатуры ======
 feedback_kb = ReplyKeyboardMarkup(
-    keyboard=[[KeyboardButton("👍"), KeyboardButton("👎")],
-              [KeyboardButton("🚨 Пожаловаться")]],
+    keyboard=[[KeyboardButton(text="👍"), KeyboardButton(text="👎")],
+              [KeyboardButton(text="🚨 Пожаловаться")]],
     resize_keyboard=True
 )
+
 chat_kb = ReplyKeyboardMarkup(
-    keyboard=[[KeyboardButton("✅ Завершить диалог")],
-              [KeyboardButton("🔄 Новый собеседник")]],
+    keyboard=[[KeyboardButton(text="✅ Завершить диалог")],
+              [KeyboardButton(text="🔄 Новый собеседник")]],
     resize_keyboard=True
 )
 
@@ -81,7 +82,7 @@ async def start_cmd(message: types.Message, state: FSMContext):
 
     await message.answer("Привет! Укажи свой пол:",
                          reply_markup=ReplyKeyboardMarkup(
-                             keyboard=[[KeyboardButton("Мужской")], [KeyboardButton("Женский")]],
+                             keyboard=[[KeyboardButton(text="Мужской")], [KeyboardButton(text="Женский")]],
                              resize_keyboard=True))
     await state.set_state(Register.gender)
 
@@ -146,7 +147,7 @@ async def process_age(message: types.Message, state: FSMContext):
     await state.update_data(age=int(message.text))
     await message.answer("Кого ищем? Укажи пол:",
                          reply_markup=ReplyKeyboardMarkup(
-                             keyboard=[[KeyboardButton("Мужской")],[KeyboardButton("Женский")]],
+                             keyboard=[[KeyboardButton(text="Мужской")],[KeyboardButton(text="Женский")]],
                              resize_keyboard=True))
     await state.set_state(Register.looking_gender)
 

@@ -1,20 +1,22 @@
-# Dockerfile — для Python 3.13 (пользователь просил 3.13)
+# Dockerfile — Python 3.13 slim
 FROM python:3.13-slim
 
-# Небольшие системные пакеты (минимум)
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+
+# Нужные системные пакеты (pip-wheel сборки, certs)
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# Скопировать зависимости и установить
 COPY requirements.txt .
-RUN pip install --upgrade pip setuptools wheel
-RUN pip install --no-cache-dir -r requirements.txt
 
-# Скопировать код
+RUN pip install --upgrade pip \
+ && pip install --no-cache-dir -r requirements.txt
+
 COPY . .
 
-# Запуск
 CMD ["python", "bot.py"]

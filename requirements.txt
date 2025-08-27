@@ -1,4 +1,5 @@
-databases[postgresql]
-SQLAlchemy
-asyncpg
 aiogram==3.1.0
+pydantic==2.1.1
+databases[postgresql]==0.7.2
+sqlalchemy==2.0.20
+openpyxl==3.1.3

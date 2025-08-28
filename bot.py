@@ -10,10 +10,12 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, FSInputFile
 from openpyxl import Workbook
 import os
+import csv
 
 # ====== Переменные окружения ======
 API_TOKEN = os.environ.get("API_TOKEN")
 ADMIN_ID = int(os.environ.get("ADMIN_ID"))
+CHANNEL_USERNAME = "anon_ru_chatik"
 
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
@@ -40,40 +42,40 @@ CREATE TABLE IF NOT EXISTS blocked_users (
 conn.commit()
 
 # ====== Хранилище пользователей ======
-users = {}          # user_id -> данные пользователя
-waiting = deque()   # очередь поиска партнера
+users = {}
+waiting = deque()
 
 # ====== FSM состояния ======
 class Register(StatesGroup):
+    check_subscribe = State()
     gender = State()
-    age_confirm = State()  # Подтверждение 18+
-    mode = State()         # Выбор режима общения
+    age_confirm = State()
+    mode = State()
 
 # ====== Клавиатуры ======
 gender_kb = ReplyKeyboardMarkup(
     keyboard=[[KeyboardButton("Мужской")], [KeyboardButton("Женский")]],
     resize_keyboard=True
 )
-
 age_confirm_kb = ReplyKeyboardMarkup(
     keyboard=[[KeyboardButton("Мне есть 18 лет ✅")],
               [KeyboardButton("Мне нет 18 лет ❌")]],
     resize_keyboard=True
 )
-
 mode_kb = ReplyKeyboardMarkup(
-    keyboard=[[KeyboardButton("Поиск ролевика")],
-              [KeyboardButton("Поиск вирта")],
-              [KeyboardButton("Просто общение")]],
+    keyboard=[
+        [KeyboardButton("Поиск ролевика")],
+        [KeyboardButton("Поиск вирта")],
+        [KeyboardButton("Просто общение")],
+        [KeyboardButton("Выбор другого режима")]
+    ],
     resize_keyboard=True
 )
-
 feedback_kb = ReplyKeyboardMarkup(
     keyboard=[[KeyboardButton("👍"), KeyboardButton("👎")],
               [KeyboardButton("🚨 Пожаловаться")]],
     resize_keyboard=True
 )
-
 chat_kb = ReplyKeyboardMarkup(
     keyboard=[[KeyboardButton("✅ Завершить диалог")],
               [KeyboardButton("🔄 Новый собеседник")]],
@@ -90,12 +92,23 @@ def add_to_waiting(user_id):
     if user_id not in waiting and not users[user_id].get("partner"):
         waiting.append(user_id)
 
-# ====== Команды ======
+# ====== Стартовый хэндлер с проверкой подписки ======
 @dp.message(CommandStart())
 async def start_cmd(message: types.Message, state: FSMContext):
-    if is_blocked(message.from_user.id):
+    uid = message.from_user.id
+    if is_blocked(uid):
         await message.answer("🚫 Вы заблокированы и не можете пользоваться ботом.")
         return
+
+    try:
+        member = await bot.get_chat_member(f"@{CHANNEL_USERNAME}", uid)
+        if member.status == "left":
+            await message.answer(f"⚠ Подпишитесь на канал @{CHANNEL_USERNAME}, чтобы пользоваться ботом.")
+            return
+    except:
+        await message.answer(f"⚠ Подпишитесь на канал @{CHANNEL_USERNAME}, чтобы пользоваться ботом.")
+        return
+
     await message.answer("Привет! Укажи свой пол:", reply_markup=gender_kb)
     await state.set_state(Register.gender)
 
@@ -115,15 +128,17 @@ async def process_age_confirm(message: types.Message, state: FSMContext):
     elif message.text != "Мне есть 18 лет ✅":
         await message.answer("Пожалуйста, выберите один из вариантов.")
         return
-
     await message.answer("Выберите режим общения:", reply_markup=mode_kb)
     await state.set_state(Register.mode)
 
 @dp.message(Register.mode)
 async def process_mode(message: types.Message, state: FSMContext):
-    data = await state.get_data()
     uid = message.from_user.id
+    if message.text == "Выбор другого режима":
+        await message.answer("Выберите режим общения:", reply_markup=mode_kb)
+        return
 
+    data = await state.get_data()
     users[uid] = {
         "gender": data["gender"],
         "mode": message.text,
@@ -152,7 +167,7 @@ async def match_users():
             if user2.get("partner"):
                 continue
 
-            if (user1["mode"] == user2["mode"]):  # Собираем по режиму
+            if user1["mode"] == user2["mode"]:
                 users[uid1]["partner"] = uid2
                 users[uid2]["partner"] = uid1
 
@@ -222,7 +237,7 @@ async def reports_cmd(message: types.Message):
     filter_type = args[1] if len(args) > 1 else None
     query = "SELECT user_id, partner_id, feedback, timestamp FROM feedback"
     params = []
-    if filter_type in ["👍", "👎", "🚨"]:
+    if filter_type in ["👍","👎","🚨"]:
         query += " WHERE feedback=?"
         params.append(filter_type)
     query += " ORDER BY id DESC LIMIT 20"
@@ -251,7 +266,7 @@ async def unblock_cmd(message: types.Message):
     await message.answer(f"✅ Пользователь {uid} разблокирован.")
 
 @dp.message(Command("export"))
-async def export_cmd(message: types.Message):
+async def export_csv(message: types.Message):
     if message.from_user.id != ADMIN_ID:
         await message.answer("У вас нет прав для этой команды.")
         return
@@ -262,13 +277,13 @@ async def export_cmd(message: types.Message):
         return
     filename = "feedback_export.csv"
     with open(filename, "w", newline="", encoding="utf-8") as f:
-        f.write("id,user_id,partner_id,feedback,timestamp\n")
-        for row in rows:
-            f.write(",".join(map(str,row))+"\n")
+        writer = csv.writer(f)
+        writer.writerow(["id","user_id","partner_id","feedback","timestamp"])
+        writer.writerows(rows)
     await message.answer_document(FSInputFile(filename))
 
 @dp.message(Command("export_xlsx"))
-async def export_xlsx_cmd(message: types.Message):
+async def export_xlsx(message: types.Message):
     if message.from_user.id != ADMIN_ID:
         await message.answer("У вас нет прав для этой команды.")
         return

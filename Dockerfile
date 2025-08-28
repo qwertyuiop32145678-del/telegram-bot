@@ -1,19 +1,24 @@
-# ====== 1. Базовый образ ======
+# Базовый образ Python 3.13
 FROM python:3.13-slim
 
-# ====== 2. Рабочая директория ======
+# Рабочая директория
 WORKDIR /app
 
-# ====== 3. Копируем файлы проекта ======
+# Устанавливаем зависимости для сборки (например, gcc для некоторых пакетов)
+RUN apt-get update && apt-get install -y \
+    gcc \
+    libffi-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Копируем requirements.txt и устанавливаем зависимости
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Копируем всё приложение
 COPY . .
 
-# ====== 4. Установка зависимостей ======
-RUN pip install --no-cache-dir --upgrade pip
-RUN pip install --no-cache-dir aiogram==3.1.1 openpyxl
+# Устанавливаем переменные окружения
+ENV PYTHONUNBUFFERED=1
 
-# ====== 5. Переменные окружения (для локального теста) ======
-# ENV API_TOKEN=твой_токен
-# ENV ADMIN_ID=твой_айди
-
-# ====== 6. Команда запуска ======
+# Запускаем бота
 CMD ["python", "bot.py"]

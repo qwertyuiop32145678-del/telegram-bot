@@ -1,21 +1,19 @@
-# Dockerfile — Python 3.13 slim
+# ====== 1. Базовый образ ======
 FROM python:3.13-slim
 
-ENV PYTHONDONTWRITEBYTECODE=1
-ENV PYTHONUNBUFFERED=1
-
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
-
+# ====== 2. Рабочая директория ======
 WORKDIR /app
 
-COPY requirements.txt .
-
-RUN pip install --upgrade pip \
- && pip install --no-cache-dir -r requirements.txt
-
+# ====== 3. Копируем файлы проекта ======
 COPY . .
 
+# ====== 4. Установка зависимостей ======
+RUN pip install --no-cache-dir --upgrade pip
+RUN pip install --no-cache-dir aiogram==3.1.1 openpyxl
+
+# ====== 5. Переменные окружения (для локального теста) ======
+# ENV API_TOKEN=твой_токен
+# ENV ADMIN_ID=твой_айди
+
+# ====== 6. Команда запуска ======
 CMD ["python", "bot.py"]

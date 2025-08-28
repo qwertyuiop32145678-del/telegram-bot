@@ -14,8 +14,11 @@ import csv
 
 # ====== Переменные окружения ======
 API_TOKEN = os.environ.get("API_TOKEN")
-ADMIN_ID = int(os.environ.get("ADMIN_ID"))
+ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))
 CHANNEL_USERNAME = "anon_ru_chatik"
+
+if not API_TOKEN:
+    raise ValueError("❌ Не найден API_TOKEN! Укажи его в настройках Render → Environment.")
 
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
@@ -54,31 +57,31 @@ class Register(StatesGroup):
 
 # ====== Клавиатуры ======
 gender_kb = ReplyKeyboardMarkup(
-    keyboard=[[KeyboardButton("Мужской")], [KeyboardButton("Женский")]],
+    keyboard=[[KeyboardButton(text="Мужской")], [KeyboardButton(text="Женский")]],
     resize_keyboard=True
 )
 age_confirm_kb = ReplyKeyboardMarkup(
-    keyboard=[[KeyboardButton("Мне есть 18 лет ✅")],
-              [KeyboardButton("Мне нет 18 лет ❌")]],
+    keyboard=[[KeyboardButton(text="Мне есть 18 лет ✅")],
+              [KeyboardButton(text="Мне нет 18 лет ❌")]],
     resize_keyboard=True
 )
 mode_kb = ReplyKeyboardMarkup(
     keyboard=[
-        [KeyboardButton("Поиск ролевика")],
-        [KeyboardButton("Поиск вирта")],
-        [KeyboardButton("Просто общение")],
-        [KeyboardButton("Выбор другого режима")]
+        [KeyboardButton(text="Поиск ролевика")],
+        [KeyboardButton(text="Поиск вирта")],
+        [KeyboardButton(text="Просто общение")],
+        [KeyboardButton(text="Выбор другого режима")]
     ],
     resize_keyboard=True
 )
 feedback_kb = ReplyKeyboardMarkup(
-    keyboard=[[KeyboardButton("👍"), KeyboardButton("👎")],
-              [KeyboardButton("🚨 Пожаловаться")]],
+    keyboard=[[KeyboardButton(text="👍"), KeyboardButton(text="👎")],
+              [KeyboardButton(text="🚨 Пожаловаться")]],
     resize_keyboard=True
 )
 chat_kb = ReplyKeyboardMarkup(
-    keyboard=[[KeyboardButton("✅ Завершить диалог")],
-              [KeyboardButton("🔄 Новый собеседник")]],
+    keyboard=[[KeyboardButton(text="✅ Завершить диалог")],
+              [KeyboardButton(text="🔄 Новый собеседник")]],
     resize_keyboard=True
 )
 
@@ -145,7 +148,10 @@ async def process_mode(message: types.Message, state: FSMContext):
         "partner": None
     }
 
-    await message.answer(f"Отлично! Теперь вы в поиске собеседника для '{message.text}'. Ждите собеседника…", reply_markup=types.ReplyKeyboardRemove())
+    await message.answer(
+        f"Отлично! Теперь вы в поиске собеседника для '{message.text}'. Ждите собеседника…",
+        reply_markup=types.ReplyKeyboardRemove()
+    )
     add_to_waiting(uid)
     await match_users()
     await state.clear()
@@ -207,16 +213,23 @@ async def chat_handler(message: types.Message):
 
     if message.text in ["👍", "👎", "🚨 Пожаловаться"]:
         partner_id = partner if partner else None
-        cursor.execute("INSERT INTO feedback (user_id, partner_id, feedback, timestamp) VALUES (?, ?, ?, ?)",
-                       (uid, partner_id, message.text, datetime.utcnow().isoformat()))
+        cursor.execute(
+            "INSERT INTO feedback (user_id, partner_id, feedback, timestamp) VALUES (?, ?, ?, ?)",
+            (uid, partner_id, message.text, datetime.utcnow().isoformat())
+        )
         conn.commit()
 
         if message.text == "🚨 Пожаловаться" and partner_id:
-            cursor.execute("SELECT COUNT(*) FROM feedback WHERE partner_id=? AND feedback='🚨 Пожаловаться'", (partner_id,))
+            cursor.execute(
+                "SELECT COUNT(*) FROM feedback WHERE partner_id=? AND feedback='🚨 Пожаловаться'",
+                (partner_id,)
+            )
             complaints = cursor.fetchone()[0]
             if complaints >= 3:
-                cursor.execute("INSERT OR REPLACE INTO blocked_users (user_id, reason, timestamp) VALUES (?, ?, ?)",
-                               (partner_id, "Слишком много жалоб", datetime.utcnow().isoformat()))
+                cursor.execute(
+                    "INSERT OR REPLACE INTO blocked_users (user_id, reason, timestamp) VALUES (?, ?, ?)",
+                    (partner_id, "Слишком много жалоб", datetime.utcnow().isoformat())
+                )
                 conn.commit()
                 await bot.send_message(partner_id, "🚫 Вы были автоматически заблокированы из-за большого количества жалоб.")
                 await bot.send_message(ADMIN_ID, f"⚠ Пользователь {partner_id} автоматически заблокирован (жалобы: {complaints}).")
@@ -237,7 +250,7 @@ async def reports_cmd(message: types.Message):
     filter_type = args[1] if len(args) > 1 else None
     query = "SELECT user_id, partner_id, feedback, timestamp FROM feedback"
     params = []
-    if filter_type in ["👍","👎","🚨"]:
+    if filter_type in ["👍", "👎", "🚨 Пожаловаться"]:
         query += " WHERE feedback=?"
         params.append(filter_type)
     query += " ORDER BY id DESC LIMIT 20"
@@ -278,7 +291,7 @@ async def export_csv(message: types.Message):
     filename = "feedback_export.csv"
     with open(filename, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
-        writer.writerow(["id","user_id","partner_id","feedback","timestamp"])
+        writer.writerow(["id", "user_id", "partner_id", "feedback", "timestamp"])
         writer.writerows(rows)
     await message.answer_document(FSInputFile(filename))
 
@@ -294,7 +307,7 @@ async def export_xlsx(message: types.Message):
         return
     wb = Workbook()
     ws = wb.active
-    ws.append(["id","user_id","partner_id","feedback","timestamp"])
+    ws.append(["id", "user_id", "partner_id", "feedback", "timestamp"])
     for row in rows:
         ws.append(row)
     filename = "feedback_export.xlsx"

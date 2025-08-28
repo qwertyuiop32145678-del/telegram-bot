@@ -1,2 +1,4 @@
-aiogram>=3.0.0
-openpyxl
+aiogram==3.22.0
+aiofiles==24.1.0
+pydantic==2.11.7
+openpyxl==3.1.5

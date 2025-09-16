@@ -18,4 +18,4 @@ RUN pip install -r requirements.txt
 COPY . .
 
 # Указываем команду запуска
-CMD ["python", "main.py"]
+CMD ["python", "bot.py"]

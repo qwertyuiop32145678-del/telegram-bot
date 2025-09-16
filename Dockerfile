@@ -1,21 +1,21 @@
-FROM python:3.13-slim
+# Используем официальный образ Python 3.12
+FROM python:3.12-slim
 
-WORKDIR /app
-
-RUN apt-get update && apt-get install -y \
-    gcc \
-    libffi-dev \
-    libssl-dev \
-    && rm -rf /var/lib/apt/lists/*
-
-# обновляем pip и запрещаем сборку из исходников
-RUN pip install --upgrade pip setuptools wheel
-
-COPY requirements.txt .
-RUN pip install --no-cache-dir --only-binary=:all: -r requirements.txt
-
-COPY . .
-
+# Устанавливаем переменную окружения для отказа от буферизации вывода (чтобы лог был читаемым)
 ENV PYTHONUNBUFFERED=1
 
-CMD ["python", "bot.py"]
+# Обновляем pip и устанавливаем зависимости
+RUN python -m pip install --upgrade pip
+
+# Копируем файлы проекта
+WORKDIR /app
+COPY requirements.txt .
+
+# Устанавливаем зависимости
+RUN pip install -r requirements.txt
+
+# Копируем весь код в контейнер
+COPY . .
+
+# Указываем команду запуска
+CMD ["python", "main.py"]
